@@ -1,0 +1,19 @@
+numpy<2.0
+pandas
+scikit-learn
+tqdm
+matplotlib
+torch==2.1.0+cu118
+torchvision==0.16.0+cu118
+torchaudio==2.1.0+cu118
+-f https://download.pytorch.org/whl/cu118
+setuptools>=59.6.0
+wheel
+packaging
+ninja
+cmake
+causal-conv1d==1.5.2
+mamba-ssm
+arch
+statsmodels
+pyarrow
