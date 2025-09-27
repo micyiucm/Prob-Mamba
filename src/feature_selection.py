@@ -122,6 +122,23 @@ def select_vif_features(
     excluded_cols = sorted(set(numeric_cols) - set(feature_cols))
     return feature_cols, excluded_cols
 
+def shift_series(df: pd.DataFrame, date_col: str = "Date", extra_shift: list[str] = None):
+    """
+    Shifts leak-prone columns by one time step to avoid look-ahead bias.
+    Args:
+        df: DataFrame containing the dataset.
+        date_col: Name of the date column to sort data.
+        extra_shift: List of additional columns to shift.
+    """
+    df = df.copy()
+    fut_cols = [c for c in df.columns if "-F" in c] # Futures
+    extra_shift = extra_shift or []
+    extra_cols = [c for c in extra_shift if c in df.columns]
+    cols_to_shift = sorted(set(fut_cols + extra_cols))
+    if cols_to_shift:
+        df[cols_to_shift] = df[cols_to_shift].shift(1) # Shift by one time step
+    return df
+
 # Main pipeline
 def run_vif(
         feather_path: str,
@@ -163,7 +180,9 @@ def run_vif(
     df[date_col] = pd.to_datetime(df[date_col], errors = "raise")
     df = df.drop_duplicates()
     df = df.sort_values(date_col).drop_duplicates(subset=[date_col]).reset_index(drop=True)
-
+    df = shift_series(
+        df, date_col = date_col, extra_shift = ['FTSE', 'GDAXI', 'FCHI', 'HSI', 'SSEC']
+    )
     # Build exclusion set
     exclude = set(feature_always_exclude) | {date_col}
     if not include_price:
