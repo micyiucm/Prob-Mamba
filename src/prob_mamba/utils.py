@@ -17,6 +17,13 @@ from mamba_ssm import Mamba
 from statsmodels.tsa.arima.model import ARIMA
 from arch import arch_model
 from torch.utils.data import DataLoader, TensorDataset
+from prob_mamba.models import SimpleRNN, MambaModel
+
+# Universal constants
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+batch_size = 64
+learning_rate = 1e-3
+num_epochs = 100
 
 # Set seed for reproducibility
 def set_seed(seed: int):
@@ -192,18 +199,130 @@ def create_sequences(data: pd.DataFrame, sequence_length: int, feature_columns: 
     X = np.array(X)
     y = np.array(y)
     return X, y
+# Deep Learning Model training and evaluation
+# Training function
+def train_model(model, train_loader, val_loader, loss_function, optimizer, num_epochs):
+    """
+    The main training loop for a PyTorch model.
+
+    Args:
+        model (nn.Module): The neural network model to train.
+        train_loader (DataLoader): DataLoader for the training set.
+        val_loader (DataLoader): DataLoader for the validation set.
+        loss_function (nn.Module): The loss function (e.g., nn.MSELoss).
+        optimizer (torch.optim.Optimizer): The optimizer (e.g., Adam).
+        num_epochs (int): The total number of epochs to train for.
+    """
+    # Start the timer
+    start_time = time.time()
+    
+    # Loop over the number of specified epochs
+    for epoch in range(num_epochs):
+        # --- Training Phase ---
+        model.train()  # Set the model to training mode
+        train_loss = 0.0
+        for inputs, targets in train_loader:
+            # Move data to the specified device (e.g., GPU)
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            # 1. Clear previous gradients
+            optimizer.zero_grad()
+            
+            # 2. Forward pass: compute predicted outputs
+            outputs = model(inputs)
+            
+            # 3. Calculate loss
+            loss = loss_function(outputs, targets)
+            
+            # 4. Backward pass: compute gradient of the loss with respect to model parameters
+            loss.backward()
+            
+            # 5. Call step() to update the weights
+            optimizer.step()
+            
+            # Accumulate the training loss
+            train_loss += loss.item() * inputs.size(0)
+        
+        # --- Validation Phase ---
+        model.eval()  # Set the model to evaluation mode
+        val_loss = 0.0
+        with torch.no_grad():  # Disable gradient calculation
+            for inputs, targets in val_loader:
+                # Move data to the specified device
+                inputs, targets = inputs.to(device), targets.to(device)
+                
+                outputs = model(inputs)
+                loss = loss_function(outputs, targets)
+                
+                # Accumulate the validation loss
+                val_loss += loss.item() * inputs.size(0)
+        
+        # Calculate average losses for the epoch
+        train_loss /= len(train_loader.dataset)
+        val_loss /= len(val_loader.dataset)
+        
+        # Print training progress (e.g., every 10 epochs)
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+             print(f'Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}')
+    
+    # Print total training time
+    end_time = time.time()
+    print(f"\nTraining finished in {end_time - start_time:.2f} seconds.")
+
+# Evaluation function
+def evaluation_function(model, test_loader, loss_function):
+    """
+    Evaluates the model on the test set and returns the average loss.
+    Args:
+        model (nn.Module): The trained model to evaluate.
+        test_loader (DataLoader): DataLoader for the test set.
+        loss_function (nn.Module): Loss function to use for evaluation.
+    Returns:
+        float: Final average loss on the test set.
+    """
+    model.to(device)  # Ensure model is on the correct device
+    model.eval()  # Set model to evaluation mode
+    # Initialisation
+    total_loss = 0.0
+    all_preds = []
+    all_targets = []
+    print("Evaluating model on test set...")
+    start_time = time.time()
+    with torch.no_grad():  # Disable gradient calculation for inference
+        for inputs, targets in test_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            outputs = model(inputs) # Get model predictions
+            loss = loss_function(outputs, targets) # Calculate loss
+            total_loss += loss.item() * inputs.size(0)  # Accumulate loss
+
+            # Store predictions and targets to analyse later if needed
+            all_preds.append(outputs.cpu().numpy())
+            all_targets.append(targets.cpu().numpy())
+        
+    end_time = time.time()
+    print(f"Evaluation completed in {end_time - start_time:.2f} seconds.")
+
+    # Calculate final average loss
+    final_loss = total_loss / len(test_loader.dataset)
+    print(f"Final Average Loss: {final_loss:.6f}")
+    return final_loss
+
 # Deep Learning baselines
+
+def param_count(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def rnn_param_count(I, H, L, O):
     """
-    Calculate number of parameters in a standard RNN with L layers.
+    Calculate number of parameters in a standard RNN with L layers without creating the model.
     I = input dim, H = hidden dim, L = num layers, O = output dim
     """
-    return (2*L - 1) * H**2 + (I + 2*L + 0) * H + O
+    return (2*L - 1) * H**2 + (I + 2*L + O) * H + O
 
 
 def train_for_val_epochs(model, train_loader, val_loader, loss_function, optimiser, epochs,
-                         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")):
+                         device = device):
     """
     Train model for a fixed number of epochs, return best validation loss and corresponding model state.
     """
@@ -230,14 +349,14 @@ def train_for_val_epochs(model, train_loader, val_loader, loss_function, optimis
         val_loss /= len(val_loader.dataset)
         if val_loss < best_val:
             best_val = val_loss
-        return best_val
+    return best_val
 
 def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers = 1, window = 10, top_k = 6):
     """
     Build multiple RNN candidates around the closed-form H that matches the target by solving a quadratic equation.
     Returns a list of dicts with keys:
     factory: callable that returns the model instance
-    hidden_dim: int, the hidden dimension
+    H: int, the hidden dimension
     L: int, number of RNN layers
     """
     a = 2*n_layers - 1
@@ -251,12 +370,12 @@ def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers = 1,
     # Explore hidden dims around H0
     candidates = []
     for H in range(max(1, H0 - window), H0 + window + 1):
-        param_count = rnn_param_count(input_dim, H, n_layers, output_dim)
+        number_params = rnn_param_count(input_dim, H, n_layers, output_dim)
         # build a no-arg factory for fresh models
         def make(H_ = H):
             return SimpleRNN(input_dim, H_, n_layers, output_dim)
         candidates.append({
-            "factory": make, "params": param_count, "H": H, "L": n_layers,
+            "factory": make, "params": number_params, "H": H, "L": n_layers,
             "label": f"RNN(H={H},L={n_layers})"
         })
     # pick top k closest to target by absolute difference
@@ -266,9 +385,9 @@ def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers = 1,
 def candidate_mambas_for_budget(input_dim, output_dim, target,
                                 n_layers = 1, d_state = 64, d_conv = 4,
                                 expand = 2, d_model_min =64, d_model_max = 512,
-                                top_k = 6):
+                                step = 8, top_k = 6):
     """
-    Systematically trying different values of d_model and keep the closed top_k to target.
+    Systematically trying different values of d_model and keep the closest top_k to target.
     """
     if "MambaModel" not in globals():
         raise ImportError("MambaModel not available.")
@@ -276,7 +395,7 @@ def candidate_mambas_for_budget(input_dim, output_dim, target,
     for d_model in range(d_model_min, d_model_max +1, step):
         model = MambaModel(input_dim, d_model = d_model, output_dim = output_dim,
                        n_layers = n_layers, d_state = d_state, d_conv = d_conv, expand = expand)
-        param= param_count(m)
+        param= param_count(model)
         def make (dm = d_model):
             return MambaModel(input_dim, d_model = dm, output_dim = output_dim,
                               n_layers = n_layers, d_state = d_state, d_conv = d_conv, expand = expand)
@@ -288,4 +407,157 @@ def candidate_mambas_for_budget(input_dim, output_dim, target,
     candidates.sort(key = lambda x: abs(x["params"] - target))
     return candidates[:top_k]
 
+def validate_param_distribution(candidates, train_loader, val_loader,
+                               loss_function, seeds = (0,1,2), val_epochs = max(10, num_epochs//5),
+                               lr = learning_rate, device = device,
+                               verbose = True):
+    """
+    For each candidate, train briefly across multiple seeds and report the
+    mean and standard deviation of best validation losses. Return the best
+    candidate spec and a report dicionary for all.
+    """
+    report = []
+    best_idx, best_mean = None, float("inf")
+
+    for idx, spec in enumerate(candidates):
+        seed_losses = []
+        for s in seeds:
+            set_seed(s)
+            model = spec["factory"]().to(device)
+            opt = optim.Adam(model.parameters(), lr = lr)
+            best_val = train_for_val_epochs(model, train_loader, val_loader,
+                                            loss_function, opt, val_epochs, 
+                                            device = device)
+            seed_losses.append(best_val)
+        mean_v = float(np.mean(seed_losses))
+        std_v = float(np.std(seed_losses))
+        item = {
+            "label": spec.get("label", f"candidate{idx}"),
+            "params": int(spec["params"]),
+            "val_mean": mean_v,
+            "val_std": std_v,
+            "seed_losses": seed_losses,
+        }
+        report.append(item)
+        if verbose:
+            print(f"[VAL] {item['label']}: params={item['params']:,}, "
+                  f"val_mean={item['val_mean']:.4f} ±  val_std={item['val_std']:.4f} over {len(seeds)} seeds")
+        if mean_v < best_mean:
+            best_mean, best_idx = mean_v, idx
+    return candidates[best_idx], report
+
+def make_loaders(X_train, y_train, X_val, y_val, X_test, y_test, batch=batch_size):
+    """
+    Create DataLoader objects for training, validation, and test sets.
+    """
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                      torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)),
+        batch_size=batch, shuffle=True)
+    val_loader = DataLoader(
+        TensorDataset(torch.tensor(X_val, dtype=torch.float32),
+                      torch.tensor(y_val, dtype=torch.float32).unsqueeze(1)),
+        batch_size=batch, shuffle=False)
+    test_loader = DataLoader(
+        TensorDataset(torch.tensor(X_test, dtype=torch.float32),
+                      torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)),
+        batch_size=batch, shuffle=False)
+    return train_loader, val_loader, test_loader
+
+def run_experiment_block_param_validated(dataset_name, all_processed_data,
+                                         budgets = (100000, 300000),
+                                         rnn_layers = 1, mamba_layers = 1,
+                                         seeds = (0,1,2), val_epochs = max(10, num_epochs//5),
+                                         tol_print = 6):
+    """
+    For each budget, build a distribution of candidates (RNN and Mamba),
+    select by validation mean across seeds, then train the selected model fully and test.
+    Returns a pandas DataFrame summarising choices and performance.
+    """
+    X_train = all_processed_data[dataset_name]["X_train"]
+    y_train = all_processed_data[dataset_name]["y_train"]
+    X_val = all_processed_data[dataset_name]["X_val"]
+    y_val = all_processed_data[dataset_name]["y_val"]
+    X_test = all_processed_data[dataset_name]["X_test"]
+    y_test = all_processed_data[dataset_name]["y_test"]
+
+    input_dim = X_train.shape[2]
+    train_loader, val_loader, test_loader = make_loaders(
+        X_train, y_train, X_val, y_val, X_test, y_test, batch = batch_size
+    )
+    loss_function = nn.MSELoss()
+    results = {}
+    for T in budgets:
+        print(f"\n{'='*20} Budget {T:,} params — candidate validation {'='*20}")
+
+        # Build candidate sets
+        rnn_candidates = candidate_rnns_for_given_budget(
+            input_dim, output_dim = 1, target = T, n_layers = rnn_layers, window = 10, top_k = tol_print
+        )
+        mamba_candidates = candidate_mambas_for_budget(
+            input_dim, output_dim = 1, target = T, n_layers = mamba_layers,
+            d_state = 16, d_conv = 4, expand = 2,
+            d_model_min = 64, d_model_max = 512, step = 8, top_k = tol_print
+        )
+
+        # Print the candidate parameter counts considered
+        if rnn_candidates:
+            print("RNN candidate params:", ", ".join(f"{c['params']:,}" for c in rnn_candidates))
+        if mamba_candidates:
+            print("Mamba candidate params:", ", ".join(f"{c['params']:,}" for c in mamba_candidates))
+
+        # Validate across seeds to pick best candidate
+        if rnn_candidates:
+            best_rnn, rnn_report = validate_param_distribution(
+                rnn_candidates, train_loader, val_loader,
+                loss_function, seeds = seeds, val_epochs = val_epochs,
+                lr = learning_rate, device = device,
+                verbose = True
+            )
+        else:
+            best_rnn, rnn_report = None, []
+        if mamba_candidates:
+            best_mamba, mamba_report = validate_param_distribution(
+                mamba_candidates, train_loader, val_loader,
+                loss_function, seeds = seeds, val_epochs = val_epochs,
+                lr = learning_rate, device = device,
+                verbose = True
+            )
+        else:
+            best_mamba, mamba_report = None, []
+        # Train full and test for the selected specs
+        for label, best_spec in [("rnn", best_rnn), ("mamba", best_mamba)]:
+            if best_spec is None:
+                continue
+            print(f"\n>>> Selected {label.upper()} for budget {T:,}: {best_spec.get('label')} "
+                  f"(params={best_spec['params']:,})")
+            model = best_spec["factory"]().to(device)
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+            t0 = time.time()
+            train_model(model, train_loader, val_loader, loss_function, optimizer, num_epochs)
+            t1 = time.time()
+            test_loss = evaluation_function(model, test_loader, loss_function)
+
+            results[f"{label}_{T//1000}k"] = {
+                "chosen_label": best_spec.get("label"),
+                "parameters": int(best_spec["params"]),
+                "val_selection_epochs": int(val_epochs),
+                "val_seeds": len(seeds),
+                "training_time_sec": float(t1 - t0),
+                "test_rmse": float(np.sqrt(test_loss)),
+                "val_report": (rnn_report if label=="rnn" else mamba_report),
+            }
+
+    df = pd.DataFrame(results).T[[
+        "chosen_label","parameters","val_selection_epochs","val_seeds",
+        "training_time_sec","test_rmse"
+    ]]
+    print("\n--- Param-Validated Final Results Summary:", dataset_name, "---")
+    print(df.to_string(formatters={
+        'parameters': '{:,.0f}'.format,
+        'training_time_sec': '{:.2f}'.format,
+        'test_rmse': '{:.6f}'.format
+    }))
+    return df, results
 
