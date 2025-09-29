@@ -3,8 +3,22 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .utils import softplus_pos, safe_cholesky, gamma, rho, batch_diag_embed
+from mamba_ssm import Mamba
+from prob_mamba.utils import softplus_pos, gamma, rho, safe_cholesky, batch_diag_embed
 
+class SimpleRNN(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_layers, output_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.rnn = nn.RNN(input_dim, hidden_dim, n_layers, batch_first=True) # tanh activation
+        self.fc = nn.Linear(hidden_dim, output_dim)
+    def forward(self, x):
+        h0 = torch.zeros(self.n_layers, x.size(0), self.hidden_dim, device=x.device)
+        out, _ = self.rnn(x, h0)  # out: (B, T, hidden_dim)
+        out = self.fc(out[:, -1, :])  # Take last time step
+        return out
+    
 def require_mamba_block():
     try:
         from mamba_ssm import Mamba  # official block
@@ -15,6 +29,30 @@ def require_mamba_block():
         ) from e
     return Mamba
 
+class MambaModel(nn.Module):
+    """
+    Input proj: (input_dim -> d_model)
+    n_layers of Mamba blocks (residual)
+    Head: (d_model -> output_dim)
+    """
+    def __init__(self, input_dim, d_model=128, d_state=16, d_conv=4, expand=2,
+                 output_dim=1, n_layers=1):
+        super().__init__()
+        self.in_proj = nn.Linear(input_dim, d_model, bias=True)
+        self.blocks = nn.ModuleList([
+            Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
+            for _ in range(n_layers)
+        ])
+        self.norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.in_proj(x)              # (B, L, d_model)
+        for blk in self.blocks:
+            h = h + blk(h)               # residual stack
+        h = self.norm(h)
+        h_last = h[:, -1, :]             # last-step regression
+        return self.fc(h_last)           # (B, 1)
     
 # Deterministic feature net
 class FeatureNet(nn.Module):
@@ -154,38 +192,60 @@ class ProbMambaHead(nn.Module):
             means_y.append(y_pred)
 
             # S = C P_pred C^T + R
-            CP = torch.bmm(Ct, P_pred)                                       # (B,d_y,n)
-            S  = torch.bmm(CP, Ct.transpose(1, 2)) + torch.diag_embed(Rt)    # (B,d_y,d_y)
-            L, used_j = safe_cholesky(S, jitter=1e-6)
-            jitters.append(torch.tensor(used_j, device=device, dtype=dtype))
+            CP = torch.bmm(Ct, P_pred)        
+            
+            if d_y == 1:
+                cpT = torch.bmm(P_pred, Ct.transpose(1, 2))                 # (B,n,1)
+                s = (torch.bmm(Ct, cpT).squeeze(-1).squeeze(-1) + Rt.squeeze(-1))  # (B,)
+                s = s.clamp_min(self.R_floor)
+                if y is not None:
+                    e = (y[:, t, 0] - y_pred[:, 0])                          # (B,)
+                else:
+                    e = torch.zeros_like(s)
 
-            if y is not None:
-                e = y[:, t, :] - y_pred                                      # (B,d_y)
+                K = (cpT.squeeze(-1) / s.unsqueeze(-1))                      # (B,n)
+                h = h_pred + K * e.unsqueeze(-1)                             # (B,n)
 
-                # K = P_pred C^T S^{-1}  via solving  S X = C P_pred  -> X^T = K
-                X = torch.cholesky_solve(CP, L)                               # (B,d_y,n)
-                K = X.transpose(1, 2)                                         # (B,n,d_y)
+                I = eye_n.unsqueeze(0)                                       # (1,n,n)
+                KC = torch.bmm(K.unsqueeze(-1), Ct)                          # (B,n,n)
+                I_KC = I - KC
+                P = torch.bmm(I_KC, torch.bmm(P_pred, I_KC.transpose(1, 2))) + \
+                    (Rt.squeeze(-1)).unsqueeze(-1).unsqueeze(-1) * torch.bmm(K.unsqueeze(-1), K.unsqueeze(1))
 
-                # update mean/cov
-                h = h_pred + torch.bmm(K, e.unsqueeze(-1)).squeeze(-1)       # (B,n)
-                I_KC = eye_n.unsqueeze(0) - torch.bmm(K, Ct)                 # (B,n,n)
-                P = I_KC @ P_pred @ I_KC.transpose(1, 2) + torch.bmm(K, torch.diag_embed(Rt)) @ K.transpose(1, 2)
+                if y is not None:
+                    logdetS = torch.log(s)
+                    ll = -0.5 * (logdetS + (e * e) / s + math.log(2.0 * math.pi))
+                    ll_terms.append(ll)
 
-                # log-likelihood
-                logdetS = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)  # (B,)
-                v = torch.cholesky_solve(e.unsqueeze(-1), L).squeeze(-1)                # (B,d_y)
-                ll = -0.5 * (logdetS + (e * v).sum(-1) + d_y * math.log(2.0 * math.pi))
-                ll_terms.append(ll)
+                vars_y.append(s.unsqueeze(-1))                                # (B,1)
+                jitters.append(torch.tensor(0.0, device=device, dtype=dtype)) # keep list aligned
             else:
-                h, P = h_pred, P_pred
+                S  = torch.bmm(CP, Ct.transpose(1, 2)) + torch.diag_embed(Rt)    # (B,d_y,d_y)
+                L, used_j = safe_cholesky(S, jitter=1e-6)
+                jitters.append(torch.tensor(used_j, device=device, dtype=dtype))
 
-            vars_y.append(torch.diagonal(S, dim1=-2, dim2=-1))                # (B,d_y)
+                if y is not None:
+                    e = y[:, t, :] - y_pred                                      # (B,d_y)
+                    X = torch.cholesky_solve(CP, L)                               # (B,d_y,n)
+                    K = X.transpose(1, 2)                                         # (B,n,d_y)
+                    h = h_pred + torch.bmm(K, e.unsqueeze(-1)).squeeze(-1)       # (B,n)
+                    I_KC = eye_n.unsqueeze(0) - torch.bmm(K, Ct)                 # (B,n,n)
+                    P = I_KC @ P_pred @ I_KC.transpose(1, 2) + torch.bmm(K, torch.diag_embed(Rt)) @ K.transpose(1, 2)
+                    logdetS = 2.0 * torch.log(torch.diagonal(L, dim1=-2, dim2=-1)).sum(-1)
+                    v = torch.cholesky_solve(e.unsqueeze(-1), L).squeeze(-1)
+                    ll = -0.5 * (logdetS + (e * v).sum(-1) + d_y * math.log(2.0 * math.pi))
+                    ll_terms.append(ll)
+                else:
+                    h, P = h_pred, P_pred
+
+                vars_y.append(torch.diagonal(S, dim1=-2, dim2=-1))            # (B,d_y)
 
         out: Dict[str, torch.Tensor] = {
             "y_mean":     torch.stack(means_y, dim=1),      # (B,T,d_y)
             "y_var_diag": torch.stack(vars_y,  dim=1),      # (B,T,d_y)
             "a_continuous": -softplus_pos(self.a_raw).detach(),
-            "used_jitter":  torch.stack(jitters).max(),
+            "used_jitter":  (torch.stack(jitters).max() if len(jitters) > 0
+                             else torch.tensor(0.0, device=device, dtype=dtype)),
         }
         if y is not None and ll_terms:
             ll_mat = torch.stack(ll_terms, dim=1)            # (B,T)
@@ -213,3 +273,10 @@ class ProbabilisticMamba(nn.Module):
     def forward(self, x_raw: torch.Tensor, y: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         z = self.features(x_raw)
         return self.lgssm(z, y)
+
+def softplus_pos(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Strictly-positive softplus used for Σ and R diagonals (and to make a_i ≤ 0 via -softplus).
+    Adds a small ε to guarantee SPD behaviour in practice.  (ε ≈ 1e-6 in the thesis.)
+    """
+    return F.softplus(x) + eps
