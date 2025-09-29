@@ -17,7 +17,6 @@ from mamba_ssm import Mamba
 from statsmodels.tsa.arima.model import ARIMA
 from arch import arch_model
 from torch.utils.data import DataLoader, TensorDataset
-from prob_mamba.models import SimpleRNN, MambaModel
 
 # Universal constants
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -200,6 +199,7 @@ def create_sequences(data: pd.DataFrame, sequence_length: int, feature_columns: 
     y = np.array(y)
     return X, y
 # Deep Learning Model training and evaluation
+
 # Training function
 def train_model(model, train_loader, val_loader, loss_function, optimizer, num_epochs):
     """
@@ -347,11 +347,12 @@ def train_for_val_epochs(model, train_loader, val_loader, loss_function, optimis
                 loss = loss_function(pred, yb)
                 val_loss += loss.item() * len(yb)
         val_loss /= len(val_loader.dataset)
+        val_loss = math.sqrt(val_loss)  # RMSE
         if val_loss < best_val:
             best_val = val_loss
     return best_val
 
-def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers = 1, window = 10, top_k = 6):
+def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers_options = [1, 2, 3], window = 10, top_k = 6):
     """
     Build multiple RNN candidates around the closed-form H that matches the target by solving a quadratic equation.
     Returns a list of dicts with keys:
@@ -359,51 +360,62 @@ def candidate_rnns_for_given_budget(input_dim, output_dim, target, n_layers = 1,
     H: int, the hidden dimension
     L: int, number of RNN layers
     """
-    a = 2*n_layers - 1
-    b = input_dim + 2*n_layers + output_dim
-    c = output_dim - target
-    delta = b**2 - 4*a*c
-    if delta < 0:
-        raise ValueError("No real-valued hidden dimension can achieve the target parameter count.")
-    # Solve the quadratic equation for H
-    H0 = max(1, int((-b + math.sqrt(delta)) / (2*a)))
-    # Explore hidden dims around H0
+    try:
+        from prob_mamba.models import SimpleRNN
+    except ImportError:
+        raise ImportError("SimpleRNN model not available.")
+    
     candidates = []
-    for H in range(max(1, H0 - window), H0 + window + 1):
-        number_params = rnn_param_count(input_dim, H, n_layers, output_dim)
-        # build a no-arg factory for fresh models
-        def make(H_ = H):
-            return SimpleRNN(input_dim, H_, n_layers, output_dim)
-        candidates.append({
-            "factory": make, "params": number_params, "H": H, "L": n_layers,
-            "label": f"RNN(H={H},L={n_layers})"
-        })
+    for n_layers in n_layers_options:
+        a = 2*n_layers - 1
+        b = input_dim + 2*n_layers + output_dim
+        c = output_dim - target
+        delta = b**2 - 4*a*c
+        if delta < 0:
+            continue  # Skip this layer count if no solution
+        # Solve the quadratic equation for H
+        H0 = max(1, int((-b + math.sqrt(delta)) / (2*a)))
+        # Explore hidden dims around H0
+        for H in range(max(1, H0 - window), H0 + window + 1):
+            number_params = rnn_param_count(input_dim, H, n_layers, output_dim)
+            # FIX: Capture variables properly in closure
+            def make(H_=H, L_=n_layers):
+                return SimpleRNN(input_dim, H_, L_, output_dim)
+            candidates.append({
+                "factory": make, "params": number_params, "H": H, "L": n_layers,
+                "label": f"RNN(H={H},L={n_layers})"
+            })
     # pick top k closest to target by absolute difference
     candidates.sort(key = lambda x: abs(x["params"] - target))
     return candidates[:top_k]
 
 def candidate_mambas_for_budget(input_dim, output_dim, target,
-                                n_layers = 1, d_state = 64, d_conv = 4,
+                                n_layers_options = [1, 2, 3], d_state = 64, d_conv = 4,
                                 expand = 2, d_model_min =64, d_model_max = 512,
                                 step = 8, top_k = 6):
     """
-    Systematically trying different values of d_model and keep the closest top_k to target.
+    Systematically trying different parameter configurations and keep the closest top_k to target.
     """
-    if "MambaModel" not in globals():
+    try:
+        from prob_mamba.models import MambaModel
+    except ImportError:
         raise ImportError("MambaModel not available.")
+    
     candidates = []
-    for d_model in range(d_model_min, d_model_max +1, step):
-        model = MambaModel(input_dim, d_model = d_model, output_dim = output_dim,
-                       n_layers = n_layers, d_state = d_state, d_conv = d_conv, expand = expand)
-        param= param_count(model)
-        def make (dm = d_model):
-            return MambaModel(input_dim, d_model = dm, output_dim = output_dim,
-                              n_layers = n_layers, d_state = d_state, d_conv = d_conv, expand = expand)
-        candidates.append({
-            "factory": make, "params": param, "d_model" : d_model, 
-            "L": n_layers, "d_state": d_state, "d_conv": d_conv,
-            "expand": expand, "label": f"Mamba(d_model={d_model}, L= {n_layers})"
-        })
+    for n_layers in n_layers_options:
+        for d_model in range(d_model_min, d_model_max + 1, step):
+            model = MambaModel(input_dim, d_model = d_model, output_dim = output_dim,
+                           n_layers = n_layers, d_state = d_state, d_conv = d_conv, expand = expand)
+            param = param_count(model)
+            # FIX: Proper indentation and closure
+            def make(dm=d_model, nl=n_layers):
+                return MambaModel(input_dim, d_model = dm, output_dim = output_dim,
+                                  n_layers = nl, d_state = d_state, d_conv = d_conv, expand = expand)
+            candidates.append({
+                "factory": make, "params": param, "d_model": d_model, 
+                "L": n_layers, "d_state": d_state, "d_conv": d_conv,
+                "expand": expand, "label": f"Mamba(d_model={d_model}, L={n_layers})"
+            })
     candidates.sort(key = lambda x: abs(x["params"] - target))
     return candidates[:top_k]
 
@@ -441,7 +453,7 @@ def validate_param_distribution(candidates, train_loader, val_loader,
         report.append(item)
         if verbose:
             print(f"[VAL] {item['label']}: params={item['params']:,}, "
-                  f"val_mean={item['val_mean']:.4f} ±  val_std={item['val_std']:.4f} over {len(seeds)} seeds")
+                  f"val_rmse={item['val_mean']:.6f} ±  val_std={item['val_std']:.4f} over {len(seeds)} seeds")
         if mean_v < best_mean:
             best_mean, best_idx = mean_v, idx
     return candidates[best_idx], report
@@ -466,7 +478,8 @@ def make_loaders(X_train, y_train, X_val, y_val, X_test, y_test, batch=batch_siz
 
 def run_experiment_block_param_validated(dataset_name, all_processed_data,
                                          budgets = (100000, 300000),
-                                         rnn_layers = 1, mamba_layers = 1,
+                                         rnn_layers_options = [1, 2, 3], 
+                                         mamba_layers_options = [1, 2, 3],
                                          seeds = (0,1,2), val_epochs = max(10, num_epochs//5),
                                          tol_print = 6):
     """
@@ -490,12 +503,14 @@ def run_experiment_block_param_validated(dataset_name, all_processed_data,
     for T in budgets:
         print(f"\n{'='*20} Budget {T:,} params — candidate validation {'='*20}")
 
-        # Build candidate sets
+        # Build candidate sets with layer options
         rnn_candidates = candidate_rnns_for_given_budget(
-            input_dim, output_dim = 1, target = T, n_layers = rnn_layers, window = 10, top_k = tol_print
+            input_dim, output_dim = 1, target = T, 
+            n_layers_options = rnn_layers_options, window = 10, top_k = tol_print
         )
         mamba_candidates = candidate_mambas_for_budget(
-            input_dim, output_dim = 1, target = T, n_layers = mamba_layers,
+            input_dim, output_dim = 1, target = T, 
+            n_layers_options = mamba_layers_options,
             d_state = 16, d_conv = 4, expand = 2,
             d_model_min = 64, d_model_max = 512, step = 8, top_k = tol_print
         )
@@ -525,6 +540,7 @@ def run_experiment_block_param_validated(dataset_name, all_processed_data,
             )
         else:
             best_mamba, mamba_report = None, []
+
         # Train full and test for the selected specs
         for label, best_spec in [("rnn", best_rnn), ("mamba", best_mamba)]:
             if best_spec is None:
@@ -561,3 +577,83 @@ def run_experiment_block_param_validated(dataset_name, all_processed_data,
     }))
     return df, results
 
+# Models
+def softplus_pos(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Strictly-positive softplus used for Σ and R diagonals (and to make a_i ≤ 0 via -softplus).
+    Adds a small ε to guarantee SPD behaviour in practice.  (ε ≈ 1e-6 in the thesis.)
+    """
+    # Enforce positivity with softplus + small epsilon.
+    return F.softplus(x) + eps
+
+
+def gamma(z: torch.Tensor) -> torch.Tensor:
+    """
+    φ1(z) = (exp(z) - 1) / z, with a stable small-z branch.
+    Used so that B̄ = diag(γ(z) * Δ) * B under ZOH.  (Defn in §5.2.2)
+    """
+    # Tolerance √machine-eps (per dtype), as in the text.
+    tol = torch.sqrt(torch.tensor(torch.finfo(z.dtype).eps, device=z.device))
+    big = torch.abs(z) >= tol
+
+    # Vectorised piecewise:
+    out = torch.empty_like(z)
+    out[big] = torch.expm1(z[big]) / z[big]
+    # Taylor: 1 + z/2 + z^2/6
+    zb = z[~big]
+    out[~big] = 1.0 + 0.5 * zb + (zb * zb) / 6.0
+    return out
+
+
+def rho(z: torch.Tensor) -> torch.Tensor:
+    """
+    ρ(z) = (exp(2z) - 1) / (2z), with a stable small-z branch.
+    Used for diagonal process noise: q_i = σ_i^2 * ρ(z_i) * Δ.  (Defn in §5.2.2)
+    """
+    tol = torch.sqrt(torch.tensor(torch.finfo(z.dtype).eps, device=z.device))
+    big = torch.abs(z) >= tol
+
+    out = torch.empty_like(z)
+    out[big] = torch.expm1(2.0 * z[big]) / (2.0 * z[big])
+    # Taylor: 1 + z + (2/3) z^2
+    zb = z[~big]
+    out[~big] = 1.0 + zb + (2.0 / 3.0) * (zb * zb)
+    return out
+
+
+def batch_diag_embed(v: torch.Tensor) -> torch.Tensor:
+    """
+    Turn a (..., n) tensor into (..., n, n) by placing v on the diagonal.
+    Works for shapes (B, n) or (B, T, n) etc.
+    """
+    return torch.diag_embed(v)
+
+
+def safe_cholesky(M: torch.Tensor, jitter: float = 1e-6, max_tries: int = 5):
+    """
+    Robust Cholesky for SPD-ish matrices (batched or single):
+    - tries torch.linalg.cholesky_ex
+    - if it fails, adds 'jitter * I' and escalates the jitter (×10) until it succeeds
+    Returns: (L, used_jitter_float)
+    Intended for Kalman innovation covariance S = C P C^T + R in §5.2.3 / log-likelihood step. 
+    """
+    # First attempt without jitter
+    L, info = torch.linalg.cholesky_ex(M, upper=False)
+    if (info == 0).all():
+        return L, 0.0
+
+    used = 0.0
+    n = M.size(-1)
+    I = torch.eye(n, dtype=M.dtype, device=M.device)
+
+    j = jitter
+    for _ in range(max_tries):
+        L, info = torch.linalg.cholesky_ex(M + j * I, upper=False)
+        if (info == 0).all():
+            used = float(j)
+            return L, used
+        j *= 10.0  # escalate
+
+    # Last resort: return the last try; this keeps autograd flowing
+    used = float(j / 10.0)
+    return L, used
