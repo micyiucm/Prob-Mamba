@@ -577,11 +577,11 @@ def run_experiment_block_param_validated(dataset_name, all_processed_data,
     }))
     return df, results
 
-# Models
+# Prob-Mamba model utilities
 def softplus_pos(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    Strictly-positive softplus used for Σ and R diagonals (and to make a_i ≤ 0 via -softplus).
-    Adds a small ε to guarantee SPD behaviour in practice.  (ε ≈ 1e-6 in the thesis.)
+    Strictly-positive softplus used for diagonal R and Sigma.
+    Adds a small epsilon to guarantee SPD behaviour in practice. 
     """
     # Enforce positivity with softplus + small epsilon.
     return F.softplus(x) + eps
@@ -589,17 +589,16 @@ def softplus_pos(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
 
 def gamma(z: torch.Tensor) -> torch.Tensor:
     """
-    φ1(z) = (exp(z) - 1) / z, with a stable small-z branch.
-    Used so that B̄ = diag(γ(z) * Δ) * B under ZOH.  (Defn in §5.2.2)
+    Scalar helper gamma(z) = (exp(z) - 1) / z using expm1 for stability.
     """
-    # Tolerance √machine-eps (per dtype), as in the text.
+    # Tolerance = sqrt(machine_epsilon)
     tol = torch.sqrt(torch.tensor(torch.finfo(z.dtype).eps, device=z.device))
     big = torch.abs(z) >= tol
 
     # Vectorised piecewise:
     out = torch.empty_like(z)
     out[big] = torch.expm1(z[big]) / z[big]
-    # Taylor: 1 + z/2 + z^2/6
+    # Taylor series expansion: 1 + z/2 + z^2/6
     zb = z[~big]
     out[~big] = 1.0 + 0.5 * zb + (zb * zb) / 6.0
     return out
@@ -607,15 +606,14 @@ def gamma(z: torch.Tensor) -> torch.Tensor:
 
 def rho(z: torch.Tensor) -> torch.Tensor:
     """
-    ρ(z) = (exp(2z) - 1) / (2z), with a stable small-z branch.
-    Used for diagonal process noise: q_i = σ_i^2 * ρ(z_i) * Δ.  (Defn in §5.2.2)
+    Scalar helper rho(z) = (exp(2z) - 1) / (2z) using expm1 for stability.
     """
     tol = torch.sqrt(torch.tensor(torch.finfo(z.dtype).eps, device=z.device))
     big = torch.abs(z) >= tol
 
     out = torch.empty_like(z)
     out[big] = torch.expm1(2.0 * z[big]) / (2.0 * z[big])
-    # Taylor: 1 + z + (2/3) z^2
+    # Taylor series expansion: 1 + z + (2/3) z^2
     zb = z[~big]
     out[~big] = 1.0 + zb + (2.0 / 3.0) * (zb * zb)
     return out
@@ -623,19 +621,16 @@ def rho(z: torch.Tensor) -> torch.Tensor:
 
 def batch_diag_embed(v: torch.Tensor) -> torch.Tensor:
     """
-    Turn a (..., n) tensor into (..., n, n) by placing v on the diagonal.
-    Works for shapes (B, n) or (B, T, n) etc.
+    Converts a vector to a diagonal matrix with diagonal entries from the vector.
     """
     return torch.diag_embed(v)
 
 
 def safe_cholesky(M: torch.Tensor, jitter: float = 1e-6, max_tries: int = 5):
     """
-    Robust Cholesky for SPD-ish matrices (batched or single):
-    - tries torch.linalg.cholesky_ex
-    - if it fails, adds 'jitter * I' and escalates the jitter (×10) until it succeeds
-    Returns: (L, used_jitter_float)
-    Intended for Kalman innovation covariance S = C P C^T + R in §5.2.3 / log-likelihood step. 
+    Compute the Cholesky decomposition of a batch of SPD matrices M.
+    If M is not numerically SPD, add jitter*I and retry, escalating jitter by
+    a factor of 10 up to max_tries times.   
     """
     # First attempt without jitter
     L, info = torch.linalg.cholesky_ex(M, upper=False)
@@ -654,6 +649,7 @@ def safe_cholesky(M: torch.Tensor, jitter: float = 1e-6, max_tries: int = 5):
             return L, used
         j *= 10.0  # escalate
 
-    # Last resort: return the last try; this keeps autograd flowing
+    # Last resort: return last attempt even if failed so PyTorch can compute derivatives
     used = float(j / 10.0)
     return L, used
+
