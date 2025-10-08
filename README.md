@@ -16,22 +16,25 @@
 
 ### 1) Stochastic selective dynamics
 Replace Mamba’s deterministic state equation with an **input-dependent SDE**:
+
 $$
-\mathrm{d}h_t \;=\; \big(A h_t + B(x_t)\,x_t\big)\,\mathrm{d}t \;+\; \Sigma(x_t)\,\mathrm{d}W_t,
-\qquad
-y_t \;=\; C(x_t)\,h_t \;+\; \varepsilon_t,
+\text{d}h_t=(A h_t + B(x_t)x_t)\thinspace\text{d}t+\Sigma(x_t)\thinspace\text{d}W_t,
+\quad
+y_t=C(x_t)h_t+\varepsilon_t,
 $$
-with heteroskedastic observation noise \( \varepsilon_t \sim \mathcal{N}\!\big(0,\,R(x_t)\big) \).  
-The maps \( B, C, \Sigma, R \) are learned and **input-dependent**.
+
+with heteroskedastic, input-dependent observation noise  $\varepsilon_t \sim \mathcal{N}(0,R(x_t))$. The maps $B, C, \Sigma$ and $R$ are learnt and **input-dependent**.
 
 ### 2) Well-posedness
 Under standard **global-Lipschitz** and **linear-growth** conditions on the learned maps, the SDE admits a **unique strong solution**, ensuring the discretised model faithfully represents the continuous dynamics.
 
 ### 3) ZOH ⇒ time-varying LGSSM + exact inference
 With **ZOH**, the SDE discretises to
+
 $$
-h_{k+1} \;=\; \bar{A}_k\,h_k \;+\; \bar{B}_k\,x_k \;+\; \eta_k, 
-\qquad
-y_k \;=\; C(x_k)\,h_k \;+\; \varepsilon_k,
+h_{k+1}=\bar{A}_kh_k +\bar{B}_kx_k+\eta_k, 
+\quad
+y_k=C(x_k)h_k+\varepsilon_k,
 $$
-with input-dependent \( \bar{A}_k,\ \bar{B}_k,\ Q_k,\ R_k \), so we can train with **exact Kalman filtering**.
+
+with input-dependent, discretised paremeters $\bar{A}_k, \bar{B}_k, Q_k$ and $R_k$. This allow inference with **Kalman filtering**.
