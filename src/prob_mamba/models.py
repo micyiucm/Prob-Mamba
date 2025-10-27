@@ -110,12 +110,12 @@ class ProbMambaHead(nn.Module):
         # prior covariance diagonal
         self.p0 = nn.Parameter(torch.full((n,), 1e-2))
 
-        # --- numeric stabilizers (tune if needed) ---
+        # numerical stablizers
         self.delta_min = 1e-3
         self.delta_max = 1.0
         self.z_clip    = 20.0
-        self.sigma_floor = 1e-3    # process noise floor
-        self.R_floor     = 1e-4    # measurement noise floor
+        self.sigma_floor = 1e-3 
+        self.R_floor     = 1e-4 
 
     @staticmethod
     def _reshape_time(x2d, B, T, *shape_tail):
@@ -132,7 +132,7 @@ class ProbMambaHead(nn.Module):
         device = x_feat.device
         dtype  = x_feat.dtype
 
-        # ---- 1) Precompute all per-time maps in one go (fast) ----
+        # ---- 1) Precompute all per-time maps ----
         X2 = x_feat.reshape(Bsz * T, Df)
 
         Delta = softplus_pos(self.gate(X2), self.eps_pos)                    # (BT,1)
@@ -276,7 +276,7 @@ class ProbabilisticMamba(nn.Module):
 
 def softplus_pos(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    Strictly-positive softplus used for Σ and R diagonals (and to make a_i ≤ 0 via -softplus).
-    Adds a small ε to guarantee SPD behaviour in practice.  (ε ≈ 1e-6 in the thesis.)
+    Strictly-positive softplus used for Sigma and R diagonals (and to make a_i ≤ 0 via -softplus).
+    Adds a small epsilon to guarantee SPD behaviour in practice.  (epsilon ≈ 1e-6 in the thesis.)
     """
     return F.softplus(x) + eps
