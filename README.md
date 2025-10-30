@@ -16,14 +16,18 @@
 ## Key Contributions (Theory)
 
 ### 1) Stochastic selective dynamics
-Replace Mamba’s deterministic state equation with an **input-dependent SDE**:
+Replace Mamba's deterministic state equation with an **input-dependent SDE**:
 
-$$\text{d}h_t= \big(A h_t + B(x_t)\,x_t\big)\,\text{d}t
-+ \Sigma(x_t)\,\text{d}W_t,\quady_t = C(x_t)\,h_t + \varepsilon_t,
 $$
-with heteroskedastic, input-dependent observation noise
-\( \varepsilon_t \sim \mathcal{N}\!\big(0,\,R(x_t)\big) \).
-The maps \( B, C, \Sigma, R \) are learned and **input-dependent**.
+\text{d}h_t = (A h_t + B(x_t)x_t)\thinspace\text{d}t + \Sigma(x_t)\thinspace\text{d}W_t
+$$
+
+$$
+y_t = C(x_t)h_t + \varepsilon_t
+$$
+
+with heteroskedastic, input-dependent observation noise  $\varepsilon_t \sim \mathcal{N}(0,R(x_t))$.  
+The maps $B, C, \Sigma, R$ are learned and **input-dependent**.
 
 ### 2) Well-posedness
 Under standard **global-Lipschitz** and **linear-growth** conditions on the learned maps, the SDE admits a **unique strong solution**, ensuring the discretised model faithfully represents the continuous dynamics.
