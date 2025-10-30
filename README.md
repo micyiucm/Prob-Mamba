@@ -18,14 +18,9 @@
 ### 1) Stochastic selective dynamics
 Replace Mamba’s deterministic state equation with an **input-dependent SDE**:
 
+$$\text{d}h_t= \big(A h_t + B(x_t)\,x_t\big)\,\text{d}t
++ \Sigma(x_t)\,\text{d}W_t,\quady_t = C(x_t)\,h_t + \varepsilon_t,
 $$
-\mathrm{d}h_t
-= \big(A h_t + B(x_t)\,x_t\big)\,\mathrm{d}t
-+ \Sigma(x_t)\,\mathrm{d}W_t,
-\qquad
-y_t = C(x_t)\,h_t + \varepsilon_t,
-$$
-
 with heteroskedastic, input-dependent observation noise
 \( \varepsilon_t \sim \mathcal{N}\!\big(0,\,R(x_t)\big) \).
 The maps \( B, C, \Sigma, R \) are learned and **input-dependent**.
