@@ -88,6 +88,7 @@ $$
 
 
 **Training Objective**: Minimize negative log-likelihood (NLL):
+
 $$
 \mathcal{L} = -\sum_{k=1}^{T} \log p(y_k | x_{1:k}, y_{1:k-1})
 $$
@@ -103,17 +104,17 @@ The Prob-Mamba architecture consists of three primary components designed to pro
 ### 1. FeatureNet
 Located in `src/prob_mamba/models.py`, this component handles the initial feature extraction using the official `mamba_ssm` backend:
 * **Input Projection**: Linearly projects raw inputs to the feature dimension: $\mathbb{R}^{d_{\text{in}}} \to \mathbb{R}^{d_{\text{feat}}}$.
-* **Residual Blocks**: Stacks `n_mamba_layers` Mamba blocks with residual connections (`z = z + blk(z)`) to capture long-range sequence dependencies [cite: 920-923].
+* **Residual Blocks**: Stacks `n_mamba_layers` Mamba blocks with residual connections (`z = z + blk(z)`) to capture long-range sequence dependencies.
 * **Normalization**: Applies `LayerNorm` to the final features before passing them to the probabilistic head.
 
 ### 2. ProbMambaHead
 Also in `src/prob_mamba/models.py`, this head implements the core probabilistic logic (Time-Varying LGSSM):
 * **Learnable Parameters**:
     * **Static Dynamics**: The state transition matrix $A$ is modeled as a learnable, static diagonal parameter (`a_raw`), constrained to be negative via `-softplus`.
-    * **Input-Dependent Maps**: Utilizes linear projections to map features $x_t$ to time-varying parameters $\Delta_t, B_t, C_t, \Sigma_t, R_t$ at every step [cite: 695-700].
+    * **Input-Dependent Maps**: Utilizes linear projections to map features $x_t$ to time-varying parameters $\Delta_t, B_t, C_t, \Sigma_t, R_t$ at every step.
 * **Discretization**: Applies Zero-Order Hold (ZOH) using vectorized operations over the time dimension for efficiency.
 * **Numerical Stability**:
-    * **Positivity**: Enforces positivity on variances ($\Sigma, R$) and time-scales ($\Delta$) using `softplus` + $\epsilon$[cite: 705].
+    * **Positivity**: Enforces positivity on variances ($\Sigma, R$) and time-scales ($\Delta$) using `softplus` + $\epsilon$.
     * **Flooring & Clamping**: Implements specific floors (`sigma_floor=1e-3`, `R_floor=1e-4`) and range clamping (`delta_min=1e-3`, `z_clip=20.0`) to prevent numerical instability during Kalman updates.
 
 
@@ -162,7 +163,7 @@ On high-frequency data, the computational cost of the probabilistic head became 
 | **ARMA+GARCH** | N/A | N/A | 0.0021 | **-10.97** |
 | **Prob-Mamba*** | ~100k | 14,702.40 | 0.0040 | -9.04 |
 
-*\*Note: Prob-Mamba results on BTC are from a partial run (20 epochs) due to compute constraints [cite: 1027-1028].*
+*\*Note: Prob-Mamba results on BTC are from a partial run (20 epochs) due to compute constraints.*
 
 ---
 
