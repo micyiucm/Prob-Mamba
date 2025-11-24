@@ -34,7 +34,7 @@ graph TD
 The model extends Mamba's deterministic state equation with Gaussian diffusion:
 
 $$
-\text{d}h_t = \left(A h_t + B(x_t)x_t\right)\text{d}t + \Sigma(x_t)\,\text{d}W_t
+\text{d}h_t = \left(A h_t + B(x_t)x_t\right)\text{d}t + \Sigma(x_t)\thinspace\text{d}W_t
 $$
 
 $$
@@ -69,8 +69,8 @@ The time-varying LGSSM admits closed-form inference via the Kalman filter:
 
 $$
 \begin{aligned}
-\hat{h}_{k+1|k} &= \bar{A}k \hat{h}{k|k} + \bar{B}k x_k\\
-P{k+1|k} &= \bar{A}k P{k|k} \bar{A}_k^\top + Q_k 
+\hat{h}_{k+1|k} &= \bar{A}_k \hat{h}_{k|k} + \bar{B}_k x_k\\
+P{k+1|k} &= \bar{A}_k P_{k|k} \bar{A}_k^{T} + Q_k 
 \end{aligned}
 $$
 
