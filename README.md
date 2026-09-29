@@ -1,318 +1,181 @@
-# Prob-Mamba: Probabilistic Time-Series Forecasting with State-Space Models
+# Prob-Mamba
 
+Probabilistic time-series forecasting with a Mamba feature encoder and a linear
+Gaussian state-space head. The encoder produces causal features; the head uses
+those features to parameterize latent dynamics and observation noise, then applies
+Kalman filtering to produce predictive means and covariances.
 
-**Prob-Mamba** extends the Mamba selective state-space architecture with **stochastic dynamics** for uncertainty-aware time-series forecasting. By incorporating an **input-dependent stochastic differential equation (SDE)** and **zero-order hold (ZOH) discretization**, the model implements a **time-varying Linear Gaussian State-Space Model (LGSSM)** with **exact Kalman filtering** for principled probabilistic predictions.
+The package includes chronological preprocessing, rolling forecasting baselines,
+training, evaluation, and a complete CPU example with generated data. The
+standalone state-space head runs on CPU; the Mamba encoder uses an optional GPU
+backend.
 
-> *This project was completed as part of an MSc Machine Learning dissertation at University College London (2024-2025).*
+## Quick start
 
----
-
-##  Overview
-
-Traditional Mamba models excel at sequence modeling but provide only point predictions. **Prob-Mamba** addresses this limitation by introducing Gaussian diffusion into the state dynamics, enabling the model to capture and propagate uncertainty through time.
-
-## Architecture
-
-The model consists of:
-
-- A **FeatureNet** built from Mamba blocks that projects inputs into a latent feature space.
-- A **Probabilistic Head** that maps these features to time-varying LGSSM parameters and runs a Kalman filter.
-
-```mermaid
-graph TD
-    Input["Input Sequence"] --> FeatureNet["FeatureNet (Mamba Blocks)"]
-    FeatureNet --> Params["Input-Dependent SDE Parameters"]
-    Params --> KF["Exact Kalman Filter Head"]
-    KF --> Output["Output: Mean, Variance, NLL"]
-```
----
-
-## Mathematical Framework
-
-### 1. Stochastic Selective Dynamics
-
-The model extends Mamba's deterministic state equation with Gaussian diffusion:
-
-$$
-\text{d}h_t = \left(A h_t + B(x_t)x_t\right)\text{d}t + \Sigma(x_t)\thinspace\text{d}W_t
-$$
-
-$$
-y_t = C(x_t)h_t + \varepsilon_t, \quad \varepsilon_t \sim \mathcal{N}(0, R(x_t))
-$$
-
-**Key properties:**
-- **Continuous-time drift**: $A = \mathrm{diag}(a_1, \ldots, a_n)$ with $a_i \leq 0$. 
-- **Input-selective mappings**: $B(\cdot)$, $C(\cdot)$, $\Sigma(\cdot)$, $R(\cdot)$ learnt via neural networks
-- **Well-posedness**: Global Lipschitz and linear growth conditions ensure unique strong solutions
-
-### 2. Zero-Order Hold (ZOH) Discretization
-
-The continuous SDE is discretised using ZOH, utilizing numerical stability helpers $\gamma(z) = \frac{e^z-1}{z}$ and $\rho(z) = \frac{e^{2z}-1}{2z}$:
-
-$$
-h_{k+1} = \bar{A}_k h_k + \bar{B}_k x_k + \eta_k, \quad \eta_k \sim \mathcal{N}(0, Q_k)
-$$
-
-where:
-- $\bar{A}_k = \exp(\Delta_k A)$
-- $\bar{B}_k = \mathrm{diag}(\gamma(\Delta_k A)\Delta_k) B(x_k)$
-- $Q_k = \mathrm{diag}(\sigma_t^2 \rho(\Delta_k A) \Delta_k)$
-
-The discretized system forms a **time-varying LGSSM**, enabling exact Bayesian inference.
-
-### 3. Exact Kalman Filtering
-
-The time-varying LGSSM admits closed-form inference via the Kalman filter:
-
-**Prediction Step:**
-
-$$
-\begin{aligned}
-\hat{h}_{k+1|k} &= \bar{A}_k \hat{h}_{k|k} + \bar{B}_k x_k\\
-P{k+1|k} &= \bar{A}_k P_{k|k} \bar{A}_k^{T} + Q_k 
-\end{aligned}
-$$
-
-**Update Step:**
-
-$$
-\begin{aligned}
-e_{k+1} &= y_{k+1} - C_{k+1} \hat{h}_{k+1|k} \\
-S_{k+1} &= C_{k+1} P_{k+1|k} C_{k+1}^\top + R_{k+1} \\
-K_{k+1} &= P_{k+1|k} C_{k+1}^\top S_{k+1}^{-1} \\
-\hat{h}_{k+1|k+1} &= \hat{h}_{k+1|k} + K_{k+1} e_{k+1} \\
-P_{k+1|k+1} &= (I - K_{k+1}C_{k+1})P_{k+1|k}(I - K_{k+1}C_{k+1})^\top + K_{k+1}R_{k+1}K_{k+1}^\top
-\end{aligned}
-$$
-
-
-**Training Objective**: Minimize negative log-likelihood (NLL):
-
-$$
-\mathcal{L} = -\sum_{k=1}^{T} \log p(y_k | x_{1:k}, y_{1:k-1})
-$$
-
----
-
-## Model Architecture
-
-The Prob-Mamba architecture consists of three primary components designed to project inputs into a feature space and then apply probabilistic state-space modeling.
-
-
-
-### 1. FeatureNet
-Located in `src/prob_mamba/models.py`, this component handles the initial feature extraction using the official `mamba_ssm` backend:
-* **Input Projection**: Linearly projects raw inputs to the feature dimension: $\mathbb{R}^{d_{\text{in}}} \to \mathbb{R}^{d_{\text{feat}}}$.
-* **Residual Blocks**: Stacks `n_mamba_layers` Mamba blocks with residual connections (`z = z + blk(z)`) to capture long-range sequence dependencies.
-* **Normalization**: Applies `LayerNorm` to the final features before passing them to the probabilistic head.
-
-### 2. ProbMambaHead
-Also in `src/prob_mamba/models.py`, this head implements the core probabilistic logic (Time-Varying LGSSM):
-* **Learnable Parameters**:
-    * **Static Dynamics**: The state transition matrix $A$ is modeled as a learnable, static diagonal parameter (`a_raw`), constrained to be negative via `-softplus`.
-    * **Input-Dependent Maps**: Utilizes linear projections to map features $x_t$ to time-varying parameters $\Delta_t, B_t, C_t, \Sigma_t, R_t$ at every step.
-* **Discretization**: Applies Zero-Order Hold (ZOH) using vectorized operations over the time dimension for efficiency.
-* **Numerical Stability**:
-    * **Positivity**: Enforces positivity on variances ($\Sigma, R$) and time-scales ($\Delta$) using `softplus` + $\epsilon$.
-    * **Flooring & Clamping**: Implements specific floors (`sigma_floor=1e-3`, `R_floor=1e-4`) and range clamping (`delta_min=1e-3`, `z_clip=20.0`) to prevent numerical instability during Kalman updates.
-
-
-
-### 3. Utility Functions
-Located in `src/prob_mamba/utils.py`, these ensure numerical precision during the recurrence:
-* **Discretization Helpers**: `gamma(z)` and `rho(z)` are implemented using `numpy.expm1` (or Torch equivalent) to maintain precision for small $\Delta$ values.
-* **Robust Inversion**: `safe_cholesky` provides a robust decomposition for the innovation covariance $S_k$, using adaptive jitter (small amount of random noise) to handle near-singular matrices during training.
-
----
-
-## 🧪 Experiments & Results
-
-We evaluated Prob-Mamba against deterministic deep learning baselines (RNN, Vanilla Mamba) and classical econometric models (ARMA-GARCH) on three financial datasets: daly **NYSE Composite** and **NASDAQ Composite (IXIC)** data, and  **Bitcoin (BTC)** data at 5-minute intervals.
-
-### Quantitative Performance
-
-#### 1. NYSE Composite (Daily)
-On the NYSE dataset, Prob-Mamba demonstrates superior volatility calibration compared to GARCH and improved point accuracy over Vanilla Mamba.
-
-| Model | Params | Training Time (s) | Test RMSE | Test QLIKE |
-| :--- | :--- | :--- | :--- | :--- |
-| **RNN (Best Det.)** | 300k | 37.94 | **0.0020** | N/A |
-| **Vanilla Mamba** | 300k | 32.11 | 0.0106 | N/A |
-| **ARMA+GARCH** | N/A | N/A | 0.0106 | -8.11 |
-| **Prob-Mamba** | ~100k | 5764.70 | **0.0074** | **-8.65** |
-
-
-#### 2. NASDAQ Composite (IXIC) (Daily)
-Similar to NYSE, Prob-Mamba outperforms the econometric baseline in both accuracy and uncertainty quantification.
-
-| Model | Params | Training Time (s) | Test RMSE | Test QLIKE |
-| :--- | :--- | :--- | :--- | :--- |
-| **RNN (Best Det.)** | 100k | 13.66 | **0.0028** | N/A |
-| **Vanilla Mamba** | 300k | 31.37 | 0.0195 | N/A |
-| **ARMA+GARCH** | N/A | N/A | 0.0157 | -7.10 |
-| **Prob-Mamba** | ~100k | 5766.52 | **0.0099** | **-8.24** |
-
-
-#### 3. Bitcoin (5-minute)
-On high-frequency data, the computational cost of the probabilistic head became a bottleneck. Prob-Mamba training was curtailed after 20 epochs due to excessive runtime.
-
-| Model | Params | Training Time (s) | Test RMSE | Test QLIKE |
-| :--- | :--- | :--- | :--- | :--- |
-| **Vanilla Mamba** | 100k | 533.76 | **0.0022** | N/A |
-| **ARMA+GARCH** | N/A | N/A | 0.0021 | **-10.97** |
-| **Prob-Mamba*** | ~100k | 14,702.40 | 0.0040 | -9.04 |
-
-*\*Note: Prob-Mamba results on BTC are from a partial run (20 epochs) due to compute constraints.*
-
----
-
-### Analysis & Discussion
-
-
-
-**1. Superior Uncertainty Calibration**
-Prob-Mamba consistently achieved lower **QLIKE** scores compared to the econometric baseline GARCH(1,1) model. This indicates that the input-dependent diffusion term $\Sigma(x_t)$ is capacble of capturing the heteroskedastic nature of financial returns.
-
-**2. Regularization via Stochasticity**
-On equity datasets, Prob-Mamba outperformed Vanilla Mamba in point accuracy (RMSE). This suggests that the introduction of stochastic dynamics and exact inference acts as a form of regularization, preventing the overfitting observed in the deterministic Mamba models.
-
-**3. The Computational Trade-off**
-The primary limitation identified is computational cost. Prob-Mamba is approximately **two to three orders of magnitude slower** than deterministic baselines (e.g., ~5700s vs ~30s).
-* **Reason**: The Kalman filter requires sequential matrix operations (inversion, multiplication) at every time step, preventing the use of Mamba's highly optimized parallel scan.
-* **Impact**: This limits scalability to high-frequency data or very long sequences under standard training budgets.
-
----
-
-## Installation
-
-### Prerequisites
-- Python 3.8+
-- CUDA 11.8+ (for GPU support)
-- PyTorch 2.1.0
-
-### Setup
+Use Python 3.10 or newer; the CPU workflow has been tested with Python 3.12.
+From the repository root:
 
 ```bash
-# Clone the repository
-git clone https://github.com/micyiucm/Prob-Mamba.git
-cd Prob-Mamba
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install mamba-ssm (GPU build)
-pip install mamba-ssm causal-conv1d==1.5.2
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python -m prob_mamba.demo --output-dir runs/cpu-example
+python -m pytest -q
 ```
 
-> **Note**: The `mamba-ssm` package requires CUDA 11.8+.
+The example generates a small latent-state time series, trains the state-space
+head, selects a checkpoint using validation NLL, and forecasts 50 test observations
+alongside an EWMA baseline. It needs no downloaded data, notebooks, Git executable,
+or GPU. It exercises the forecasting pipeline; it does not train the Mamba encoder
+or establish performance on financial data.
 
----
+To include the rolling ARMA-GARCH baseline:
 
-## Usage
+```bash
+python -m pip install -e '.[baselines,dev]'
+python -m prob_mamba.demo --output-dir runs/cpu-classical --with-classical
+```
 
-### Quick Start
+Run `python -m prob_mamba.demo --help` for seed, epoch, and output options.
+Each run writes:
+
+- `best.pt`: validation-selected model and optimizer state, with configuration.
+- `predictions.csv`: forecast origins, target timestamps, outcomes, means, and variances.
+- `scores.json`: forecast errors, likelihood scores, and uncertainty diagnostics.
+- `training.json`: training and validation losses and selected epoch.
+- `metadata.json`: seed, feature order, scaling, split cutoffs, dependency versions,
+  data and source hashes, and source revision when available.
+
+## Optional dependencies
+
+| Extra | Purpose |
+| --- | --- |
+| `baselines` | ARMA, GARCH, and VIF feature selection |
+| `data` | Feather/Arrow file loading |
+| `dev` | Tests |
+| `mamba` | Mamba encoder and convolution extension |
+
+For example, `python -m pip install -e '.[data,baselines,dev]'` installs the CPU
+tools and tests. `python -m pip install -r requirements.txt` installs the same set.
+Tests for unavailable optional dependencies are skipped.
+
+### Mamba setup
+
+The Mamba-1 encoder uses a compiled selective-scan extension. On Linux with a
+supported NVIDIA GPU, first install a CUDA-enabled PyTorch build suitable for your
+machine, then install the optional backend:
+
+```bash
+python -m pip install setuptools wheel packaging ninja
+MAMBA_KEEP_CUDA_BUILD=TRUE python -m pip install --no-build-isolation -e '.[mamba]'
+```
+
+The environment variable opts into the selective-scan extension in current Mamba
+builds. See the [upstream installation instructions](https://github.com/state-spaces/mamba#installation)
+for platform and CUDA requirements. The full encoder has not been validated in the
+CPU environment used for this repository's tests.
+
+## Model API
+
+`ProbMambaHead` accepts features shaped `(batch, steps, features)` and optional
+observations shaped `(batch, steps, outputs)`. For financial returns, set
+`target_scale` to the standard deviation of the training targets, in the units
+passed to the model.
 
 ```python
 import torch
-from prob_mamba.models import ProbabilisticMamba
+from prob_mamba import ProbMambaHead
 
-# Initialize model
+training_target_std = 0.004  # substitute your training-only estimate
+head = ProbMambaHead(d_feat=3, d_y=1, n_state=4,
+                     target_scale=training_target_std)
+features = torch.randn(2, 12, 3)
+targets = torch.randn(2, 12, 1) * training_target_std
+observed = torch.ones(2, 12, dtype=torch.bool)
+observed[:, -1] = False
+targets[:, -1] = float('nan')
+
+prediction = head(features, targets, observed_mask=observed)
+mean = prediction['y_mean'][:, -1]
+variance = prediction['y_var_diag'][:, -1]
+```
+
+Predictions are computed before assimilating the corresponding observation.
+Missing observations skip the update. The variance floor scales with
+`target_scale**2`; the default `target_scale=1` is suitable for unit-scale targets.
+
+To add the Mamba encoder after installing its backend:
+
+```python
+from prob_mamba import ProbabilisticMamba
+
 model = ProbabilisticMamba(
-    d_in=50,           # Number of input features
-    d_feat=128,        # Feature embedding dimension
-    d_y=1,             # Output dimension (univariate forecasting)
-    n_state=64,        # Hidden state dimension
-    n_mamba_layers=2,  # Number of Mamba blocks
-    mamba_cfg={"d_state": 64, "d_conv": 4, "expand": 2}
-)
-
-# Forward pass
-x = torch.randn(32, 270, 50)  # (batch, sequence_length, features)
-y = torch.randn(32, 270, 1)   # (batch, sequence_length, output_dim)
-
-# Training mode (with targets)
-outputs = model(x, y)
-print(f"NLL: {outputs['nll']:.4f}")
-print(f"Mean shape: {outputs['y_mean'].shape}")       # (32, 270, 1)
-print(f"Variance shape: {outputs['y_var_diag'].shape}") # (32, 270, 1)
-
-# Inference mode
-with torch.no_grad():
-    outputs = model(x, y)
-    predictions = outputs['y_mean'][:, -1, :]  # Last-step predictions
-    uncertainties = outputs['y_var_diag'][:, -1, :]
+    d_in=3, d_feat=32, d_y=1, n_state=4,
+    head_cfg={'target_scale': training_target_std},
+).to('cuda')
 ```
 
-### Training Example
+The head also exposes `predict_step`, `update_step`, `final_state_mean`, and
+`final_state_covariance`. These support continuation over precomputed features.
+Continuing the complete encoder requires its recurrent and convolution states too.
 
-```python
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+## Using your own data
 
-# Prepare data loaders
-train_loader = DataLoader(
-    TensorDataset(X_train, y_train), 
-    batch_size=64, 
-    shuffle=True
-)
+Start with a pandas DataFrame containing unique timestamps, finite positive prices,
+and any numeric features available at each forecast origin. Call `preprocess_frame`
+with the date and price column names and explicit training/validation cutoffs. It
+constructs next-observation log returns, fits feature scaling on training data,
+and returns chronological train, validation, and test partitions. Targets remain
+in their original return units. Feature publication times must be checked by the
+caller; preprocessing cannot infer when an external feature was available.
 
-# Initialize model and optimizer
-model = ProbabilisticMamba(d_in=50, d_feat=128, d_y=1, n_state=64)
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+Use the [complete example](src/prob_mamba/demo.py) as a template for connecting
+preprocessing, data loaders, training, and scoring:
 
-# Training loop
-model.train()
-for epoch in range(100):
-    epoch_loss = 0.0
-    for x_batch, y_batch in train_loader:
-        x_batch = x_batch.to(device)
-        y_batch = y_batch.to(device)
-        
-        optimizer.zero_grad()
-        outputs = model(x_batch, y_batch)
-        loss = outputs['nll']
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        epoch_loss += loss.item() * x_batch.size(0)
-    
-    avg_loss = epoch_loss / len(train_loader.dataset)
-    if (epoch + 1) % 10 == 0:
-        print(f"Epoch {epoch+1}: NLL = {avg_loss:.6f}")
-```
+1. Build windows from `split.chronological()` with `create_causal_windows`, selecting
+   each partition's target timestamps. This retains earlier context for validation
+   and test. Insufficient context raises an error unless explicitly allowed.
+2. Train with `train_probabilistic_model`. Its default `loss_scope='last_step'`
+   scores window endpoints while historical observations condition the filter.
+   The best validation checkpoint is restored automatically.
+3. Forecast with `predict_causal_windows`, which withholds endpoint labels and
+   returns timestamped scalar predictions. Each window starts from the head prior.
+4. Use `assert_common_scoring_support` before comparing prediction tables, then
+   `score_prediction_frame` to compute scores on matching observations.
 
-### Evaluation
+`rolling_arma_forecast`, `rolling_arma_garch_forecast`,
+`rolling_zero_mean_garch_forecast`, and `rolling_ewma_forecast` update from newly
+observed test outcomes. Supply the complete chronological test sequence, then
+select any common scoring subset. ARMA-based helpers select orders on training
+data and fit parameters on train/validation observations available at the first
+test origin. Match parameter-fitting and checkpoint-selection schedules when
+designing a controlled comparison.
 
-```python
-from prob_mamba.eval import eval_prob_rmse_qlike_laststep
+## Interpretation
 
-# Evaluate on test set
-test_loader = DataLoader(
-    TensorDataset(X_test, y_test),
-    batch_size=64,
-    shuffle=False
-)
+The stochastic component is the state-space head; the Mamba encoder is
+deterministic. The head uses exact zero-order-hold discretization and Joseph
+covariance updates. Exact conditional Gaussian filtering requires a Gaussian
+prior, fresh independent innovations, and coefficients determined by available
+information. Learned parameters are treated as fixed during inference.
 
-model.eval()
-metrics = eval_prob_rmse_qlike_laststep(model, test_loader, device)
+Evaluation includes RMSE, Gaussian NLL, residual QLIKE, interval coverage/width,
+and summaries of probability integral transforms and standardized innovations.
+For the same scalar forecasts, `NLL = (QLIKE + log(2*pi)) / 2`, so these two scores
+provide equivalent rankings. Coverage and PIT summaries are diagnostics and do
+not by themselves establish calibration. Zero-mean-proxy QLIKE assumes a zero
+conditional mean.
 
-print(f"Test RMSE: {metrics['rmse']:.6f}")
-print(f"Test QLIKE: {metrics['qlike']:.6f}")
-print(f"Test NLL: {metrics['nll']:.6f}")
-```
+## Layout
 
----
-
+- `src/prob_mamba/data.py`, `datasets.py`: preprocessing and forecast windows.
+- `src/prob_mamba/models.py`, `numerics.py`: models and filtering operations.
+- `src/prob_mamba/training.py`: training and checkpoint selection.
+- `src/prob_mamba/evaluation.py`, `metrics.py`: prediction tables and scoring.
+- `src/prob_mamba/baselines.py`, `features.py`: baselines and feature helpers.
+- `src/prob_mamba/demo.py`: complete CPU workflow.
+- `tests/`: numerical, forecasting, and integration checks.
 
 ## License
 
-This project is licensed under the MIT License.
-
+MIT; see [LICENSE](LICENSE).

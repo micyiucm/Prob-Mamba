@@ -21,3 +21,7 @@ checkpoints/
 *.pth
 .venv/
 env/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
